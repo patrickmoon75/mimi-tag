@@ -1,6 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { createClient as createPlainClient } from "@supabase/supabase-js";
 
 const url = () => process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -15,7 +15,7 @@ export async function userClient() {
   return createServerClient(url(), anonKey(), {
     cookies: {
       getAll: () => store.getAll(),
-      setAll: (list) => {
+      setAll: (list: { name: string; value: string; options: CookieOptions }[]) => {
         try {
           for (const { name, value, options } of list) store.set(name, value, options);
         } catch {
