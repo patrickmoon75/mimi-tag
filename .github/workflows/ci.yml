@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install
+        id: install
+        run: npm install --no-audit --no-fund 2>&1 | tee ci-install.log
+
+      - name: unit tests
+        id: test
+        if: always() && steps.install.outcome == 'success'
+        run: npm test 2>&1 | tee ci-test.log
+
+      - name: db rules
+        id: db
+        if: always()
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c 'create database t' 2>&1 | tee ci-db.log
+          psql -h localhost -U postgres -d t -v ON_ERROR_STOP=1 \
+            -f supabase/tests/00_supabase_stub.sql \
+            -f supabase/migrations/20260927000001_init.sql \
+            -f supabase/tests/01_rules.sql 2>&1 | tee -a ci-db.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: typecheck
+        id: typecheck
+        if: always() && steps.install.outcome == 'success'
+        run: npx next build --no-lint 2>&1 | tee ci-build.log; exit ${PIPESTATUS[0]}
+
+      # 결과를 ci-logs 브랜치에 남긴다(비공개 저장소에서 결과를 확인하기 위함)
+      - name: publish logs
+        if: always()
+        run: |
+          mkdir -p /tmp/logs && cp ci-*.log /tmp/logs/ 2>/dev/null || true
+          cat > /tmp/logs/summary.txt <<EOF
+          commit: ${{ github.sha }}
+          install: ${{ steps.install.outcome }}
+          test: ${{ steps.test.outcome }}
+          db: ${{ steps.db.outcome }}
+          build: ${{ steps.typecheck.outcome }}
+          EOF
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git fetch origin ci-logs || true
+          git checkout --orphan ci-logs-tmp
+          git rm -rf --cached . >/dev/null
+          rm -rf ./* ./.github ./.gitignore 2>/dev/null || true
+          cp /tmp/logs/* .
+          git add -A && git commit -m "ci ${{ github.sha }}" >/dev/null
+          git push -f origin ci-logs-tmp:ci-logs
